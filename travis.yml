@@ -1,0 +1,240 @@
+branches:
+  - master
+
+git:
+  depth: 30
+
+addons:
+  hosts:
+    - db
+    - elasticsearch
+    - redis
+    - memcache
+    - web
+    - localstack
+    - ror
+    - mongodb
+    - postgres
+
+
+_rspec_defaults: &rspec_defaults
+  stage: test
+  language: ruby
+  rvm: 2.6.3
+  before_install:
+    - echo "2.6.3" > .ruby-version
+    - export TEST_DB_HRC_PORT=3308
+    - export TEST_DB_HRW_PORT=3306
+    - wget https://repo.mysql.com//mysql-apt-config_0.8.10-1_all.deb
+    - sudo dpkg -i mysql-apt-config_0.8.10-1_all.deb
+    - sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 
+    - sudo apt-get update -q
+    - sudo apt-get install -q -y --allow-unauthenticated -o Dpkg::Options::=--force-confnew mysql-client
+    - mysql --version
+    - docker run -d -p $TEST_DB_HRC_PORT:3306 -e MYSQL_ROOT_PASSWORD=mysql mysql:5.7.16 mysqld --sql_mode="NO_ENGINE_SUBSTITUTION" --default-authentication-plugin=mysql_native_password --group_concat_max_len=1000000 --log_output=FILE --log_slow_admin_statements=ON --long_query_time=1.000000 --max_connections=10572 --slow_query_log=ON --binlog_format=MIXED --explicit_defaults_for_timestamp=ON
+    - docker run -d -p $TEST_DB_HRW_PORT:3306 -e MYSQL_ROOT_PASSWORD=mysql mysql:8.0.30 mysqld --sql_mode="NO_ENGINE_SUBSTITUTION" --default-authentication-plugin=mysql_native_password --group_concat_max_len=1000000 --log_output=FILE --log_slow_admin_statements=ON --long_query_time=1.000000 --max_connections=10572 --slow_query_log=ON --binlog_format=MIXED --explicit_defaults_for_timestamp=ON --character_set_server=latin1 --collation_server=latin1_swedish_ci
+    - until mysqladmin -hdb -P$TEST_DB_HRC_PORT -uroot -pmysql ping &> /dev/null; do echo 'waiting for local node mysql db'; sleep 1; done
+    - until mysqladmin -hdb -P$TEST_DB_HRW_PORT -uroot -pmysql ping &> /dev/null; do echo 'waiting for local node mysql db'; sleep 1; done
+    - mysql -e "SELECT @@GLOBAL.sql_mode;" -uroot -pmysql -hdb
+    - mysql -e "CREATE DATABASE recruit_test;" -uroot -pmysql -hdb
+    - mysql -e "CREATE DATABASE test12345_test;" -uroot -pmysql -hdb -P$TEST_DB_HRC_PORT
+    - sudo pip install awscli
+    - aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/
+    - cd ..
+    - git clone --depth=1 git@github.com
+    - cd content-service
+    # Load cached docker images
+    - if [[ -d $HOME/docker ]]; then ls $HOME/docker/*.tar.gz | xargs -I {file} sh -c "zcat {file} | docker load"; fi
+    - docker build -t content_service_test -f docker/test/Dockerfile . --cache-from content_service_test:latest
+    - docker-compose -f docker/test/docker-compose.yml up -d
+    - cd ../test12345
+    - sudo mkdir /store
+    - sudo chmod -R a+rwx /store
+    - mkdir -p log
+    - sudo rm -rf /var/lib/elasticsearch
+    - curl -O https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-5.2.1.deb
+      && sudo dpkg -i --force-confnew elasticsearch-5.2.1.deb && sudo service elasticsearch
+      restart
+    - wget https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-7.14.0-linux-x86_64.tar.gz && tar -zxf elasticsearch-7.14.0-linux-x86_64.tar.gz
+    - elasticsearch-7.14.0/bin/elasticsearch -E cluster.name='elastic_cluster2' -E node.name='node-2' -E node.data=true -E transport.tcp.port=9500 -E http.port=9400 -d
+    - docker-compose -f script/aws-docker-compose.yml up -d
+    - openssl aes-256-cbc -K $encrypted_50e10335c14e_key -iv $encrypted_50e10335c14e_iv
+      -in credentials.tar.gz.enc -out credentials.tar.gz -d
+    - tar -xzf credentials.tar.gz
+    - gem install bundler
+    - export BUNDLE_PATH=$HOME/vendor/bundle
+    - export TEST_SUITES=11
+    - |
+      if [[ $TRAVIS_EVENT_TYPE == "pull_request" ]]
+      then
+        export GIT_BRANCH=$TRAVIS_PULL_REQUEST_BRANCH
+      else
+        export GIT_BRANCH=$TRAVIS_BRANCH
+      fi
+  services:
+    - mysql
+    - memcached
+    - redis-server
+    - elasticsearch
+    - mongodb
+    - postgresql
+  cache:
+    bundler: true
+    directories:
+      - '$HOME/.cache/pip'
+      - '$HOME/docker'
+      - '$HOME/vendor/bundle'
+  before_script:
+    - curl -L https://codeclimate.com/downloads/test-reporter/test-reporter-0.8.0-linux-amd64 > ./cc-test-reporter
+    - chmod +x ./cc-test-reporter
+    - ./cc-test-reporter before-build
+    - mysql -u root -pmysql -hdb -P$TEST_DB_HRC_PORT test12345_test < db/structure.sql
+    - mysql -u root -pmysql -hdb recruit_test < db_recruit/structure.sql
+    - RAILS_ENV=test bundle exec rake es:create_and_initialize
+    - sudo su - postgres -c "psql -c \"create role root with createdb login password 'postgresql';\""
+    - sudo su - postgres -c "psql -c \"CREATE DATABASE hr_analytics_test;\""
+    - psql -U root hr_analytics_test < db/test12345_analytics/structure.sql
+    - export RSPEC_TRACER_S3_URI=s3://hr-external-ci-artifcats/rspec-tracer-cache/$TRAVIS_REPO_SLUG
+    - export COVERAGE_S3_URI=s3://hr-external-ci-artifcats/travis-ci-coverage/$TRAVIS_REPO_SLUG/$TRAVIS_BUILD_NUMBER
+    - |
+      if [[ $RSPEC_TRACER == "true" && $TRAVIS_EVENT_TYPE == "push" ]]
+      then
+        export RSPEC_TRACER_NO_SKIP=true
+      fi
+    - |
+      if [[ $RSPEC_TRACER == "true" && $TRAVIS_EVENT_TYPE == "pull_request" ]]
+      then
+        bundle exec rake rspec_tracer:remote_cache:download
+      fi
+  after_script:
+    - |
+      if [[ $RSPEC_TRACER == "true" ]]
+      then
+        bundle exec rake rspec_tracer:remote_cache:upload
+      fi
+    - |
+      if [ "$TRAVIS_TEST_RESULT" -eq "0" ]; then
+        ./cc-test-reporter format-coverage \
+          --output coverage/coverage_$TEST_SUITE_ID.json \
+          --input-type simplecov
+
+        aws s3 cp coverage/coverage_$TEST_SUITE_ID.json $COVERAGE_S3_URI/coverage_$TEST_SUITE_ID.json
+      else
+        echo "Non zero Travis status. Skipping CodeClimate upload"
+      fi
+  before_cache:
+    # Save tagged docker images
+    - >
+      rm -rf $HOME/docker && mkdir $HOME/docker && docker images content_service_test -a --filter='dangling=false' --format '{{.Repository}}:{{.Tag}} {{.ID}}'
+      | xargs -n 2 -t sh -c 'test -e $HOME/docker/$1.tar.gz || docker save $0 | gzip -2 > $HOME/docker/$1.tar.gz'
+
+jobs:
+  include:
+    - <<: *rspec_defaults
+      name: 'HRW Suite 1 - Requests, Models, Services'
+      env: TEST_SUITE_ID=1
+      script:
+      - RAILS_ENV=test bundle exec rspec --pattern "spec/hrw/x/requests/**/*_spec.rb,spec/hrw/models/**/*_spec.rb,spec/hrw/services/**/*_spec.rb" --exclude-pattern "spec/hrw/workers/enqueue_competition_started_bulk_email_spec.rb,spec/hrw/x/mailers/competition_mailer_spec.rb" --failure-exit-code 0
+      - RAILS_ENV=test bundle exec rspec --only-failures
+    - <<: *rspec_defaults
+      name: 'HRW Suite 2 - Models, Helpers, Tasks, Mailers'
+      env: TEST_SUITE_ID=2
+      script:
+      - RAILS_ENV=test bundle exec rspec --pattern "spec/hrw/x/helpers/**/*_spec.rb,spec/hrw/x/initializers/**/*_spec.rb,spec/hrw/x/features/**/*_spec.rb,spec/hrw/x/models/**/*_spec.rb,spec/hrw/x/tasks/**/*_spec.rb,spec/hrw/x/mailers/**/*_spec.rb" --exclude-pattern "spec/hrw/workers/enqueue_competition_started_bulk_email_spec.rb,spec/hrw/x/mailers/competition_mailer_spec.rb" --failure-exit-code 0
+      - RAILS_ENV=test bundle exec rspec --only-failures
+    - <<: *rspec_defaults
+      name: 'HRW Suite 3 - Controllers'
+      env: TEST_SUITE_ID=3
+      script:
+      - RAILS_ENV=test bundle exec rspec --pattern "spec/hrw/x/controllers/*_spec.rb" --exclude-pattern "spec/hrw/workers/enqueue_competition_started_bulk_email_spec.rb,spec/hrw/x/mailers/competition_mailer_spec.rb" --failure-exit-code 0
+      - RAILS_ENV=test bundle exec rspec --only-failures
+    - <<: *rspec_defaults
+      name: 'HRW Suite 4 - Services, Controllers, Workers'
+      env: TEST_SUITE_ID=4
+      script:
+      - RAILS_ENV=test bundle exec rspec --pattern "spec/hrw/x/controllers/codepair/**/*_spec.rb,spec/hrw/controllers/**/*_spec.rb,spec/hrw/http/**/*_spec.rb,spec/hrw/x/service/**/*_spec.rb,spec/hrw/x/workers/**/*_spec.rb,spec/hrw/x/sidekiq_workers/**/*_spec.rb,spec/hrw/workers/**/*_spec.rb" --exclude-pattern "spec/hrw/workers/enqueue_competition_started_bulk_email_spec.rb,spec/hrw/x/mailers/competition_mailer_spec.rb" --failure-exit-code 0
+      - RAILS_ENV=test bundle exec rspec --only-failures
+    - <<: *rspec_defaults
+      name: 'HRW Suite 5 - API V1'
+      env: TEST_SUITE_ID=5
+      script:
+      - RAILS_ENV=test bundle exec rspec --pattern "spec/hrw/x/controllers/api_v1/**/*_spec.rb" --failure-exit-code 0
+      - RAILS_ENV=test bundle exec rspec --only-failures
+    - <<: *rspec_defaults
+      name: 'HRW Suite 6 - API V3'
+      env: TEST_SUITE_ID=6
+      script:
+      - RAILS_ENV=test bundle exec rspec --pattern "spec/hrw/x/controllers/api_v3/**/*_spec.rb" --exclude-pattern "spec/hrw/workers/enqueue_competition_started_bulk_email_spec.rb,spec/hrw/x/mailers/competition_mailer_spec.rb" --failure-exit-code 0
+      - RAILS_ENV=test bundle exec rspec --only-failures
+    - <<: *rspec_defaults
+      name: 'HRW Suite 7 - Requests, Other Fixtures Test'
+      env: TEST_SUITE_ID=7
+      script:
+      - RAILS_ENV=test bundle exec rspec --pattern "spec/hrw/workers/enqueue_competition_started_bulk_email_spec.rb,spec/hrw/x/mailers/competition_mailer_spec.rb,spec/hrw/requests/**/*_spec.rb,spec/hrw/recruit/**/*_spec.rb" --failure-exit-code 0
+      - RAILS_ENV=test bundle exec rspec --only-failures
+    - <<: *rspec_defaults
+      name: 'Rspec: RBA (BYOD), Projects'
+      env: TEST_SUITE_ID=8
+      script:
+      - RAILS_ENV=test bundle exec rspec --pattern "spec/rba/**/*_spec.rb,spec/projects/**/*_spec.rb,spec/hrw/decorators/recruit/solve_decorator_spec.rb" --failure-exit-code 0
+      - RAILS_ENV=test bundle exec rspec --only-failures
+    - <<: *rspec_defaults
+      name: 'Rspec: Skills Platform'
+      env: TEST_SUITE_ID=9
+      script:
+      - RAILS_ENV=test bundle exec rspec spec/skills --failure-exit-code 0
+      - RAILS_ENV=test bundle exec rspec --only-failures
+    - <<: *rspec_defaults
+      name: 'Rspec: Sudorank'
+      env: TEST_SUITE_ID=10
+      script:
+      - RAILS_ENV=test bundle exec rspec spec/hrw/sudorank --failure-exit-code 0
+      - RAILS_ENV=test bundle exec rspec --only-failures
+    - <<: *rspec_defaults
+      name: 'Rspec: Shared helpers, services'
+      env: TEST_SUITE_ID=11
+      script:
+      - RAILS_ENV=test bundle exec rspec --exclude-pattern "spec/hrc/**/*_spec.rb,spec/hrw/**/*_spec.rb,spec/rba/**/*_spec.rb,spec/projects/**/*_spec.rb,spec/skills/**/*_spec.rb" --failure-exit-code 0
+      - RAILS_ENV=test bundle exec rspec --only-failures
+    - <<: *rspec_defaults
+      name: 'Rspec: Temporal Workflows'
+      env: TEST_SUITE_ID=12
+      script:
+        - RAILS_ENV=test bundle exec rspec spec/temporal --failure-exit-code 0
+        - RAILS_ENV=test bundle exec rspec --only-failures
+    - stage: test
+      if: branch = master AND (type = cron OR type = push)
+      language: ruby
+      name: 'Yard Doc generation'
+      cache:
+        - pip
+        - bundler
+      before_install:
+        - sudo pip install awscli
+        - gem install yard
+      install:
+        - git fetch --unshallow
+      script:
+        - travis_wait 45 yard doc --protected --private
+        - aws s3 sync doc/ $ARTIFACTS_BUCKET/docs/test12345/yard-doc
+    - stage: code coverage
+      env: TEST_SUITES=12
+      language: ruby
+      cache:
+        bundler: true
+        directories:
+          - '$HOME/.cache/pip'
+          - '$HOME/vendor/bundle'
+      before_install:
+        - echo "2.6.3" > .ruby-version
+        - sudo pip install awscli
+        - sudo apt-get install jq
+        - gem install bundler
+        - export BUNDLE_PATH=$HOME/vendor/bundle
+      before_script:
+        - curl -L https://codeclimate.com/downloads/test-reporter/test-reporter-0.8.0-linux-amd64 > ./cc-test-reporter
+        - chmod +x ./cc-test-reporter
+        - './cc-test-reporter before-build'
+        - mkdir coverage
+        - export COVERAGE_S3_URI=s3://hr-external-ci-artifcats/travis-ci-coverage/$TRAVIS_REPO_SLUG/$TRAVIS_BUILD_NUMBER
+      script: bash script/upload_coverage.sh
