@@ -1,5 +1,9 @@
 branches:
-  - master
+  - main
+
+env:
+  - TEST_DB_HRC_PORT=3308
+  - TEST_DB_HRW_PORT=3306
 
 git:
   depth: 30
@@ -23,8 +27,6 @@ _rspec_defaults: &rspec_defaults
   rvm: 2.6.3
   before_install:
     - echo "2.6.3" > .ruby-version
-    - export TEST_DB_HRC_PORT=3308
-    - export TEST_DB_HRW_PORT=3306
     - wget https://repo.mysql.com//mysql-apt-config_0.8.10-1_all.deb
     - sudo dpkg -i mysql-apt-config_0.8.10-1_all.deb
     - sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 
